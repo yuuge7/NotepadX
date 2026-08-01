@@ -42,6 +42,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private const int ClosedTabLimit = 10;
 
     private MatchHighlightAdorner? _highlightAdorner;
+    private bool _highlightRetryPending;
     private bool _checkingDisk;
 
     private sealed record ClosedTab(
@@ -328,6 +329,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 var tab = _activeTab;
                 Dispatcher.BeginInvoke(() =>
                 {
+                    // Switching again before this ran would otherwise attach the gutter and
+                    // a second adorner to an editor that is no longer on screen.
+                    if (!ReferenceEquals(_activeTab, tab)) return;
+
                     tab.Editor.ScrollToVerticalOffset(tab.ScrollOffset);
                     tab.Editor.Focus();
                     Gutter.Attach(tab.Editor);
@@ -448,11 +453,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        // A just-switched-to editor has no layout yet, so its line queries throw. Retry
+        // once after layout rather than leaving the bar looking like there are no matches.
+        int lineCount;
+        try { lineCount = editor.LineCount; } catch (Exception) { lineCount = 0; }
+        if (lineCount <= 0)
+        {
+            _highlightAdorner.Clear();
+            if (!_highlightRetryPending)
+            {
+                _highlightRetryPending = true;
+                Dispatcher.BeginInvoke(() => { _highlightRetryPending = false; RefreshHighlights(); },
+                    DispatcherPriority.Background);
+            }
+            return;
+        }
+
         try
         {
             int firstLine = editor.GetFirstVisibleLineIndex();
             int lastLine = editor.GetLastVisibleLineIndex();
             if (firstLine < 0 || lastLine < firstLine) { _highlightAdorner.Clear(); return; }
+            if (firstLine >= lineCount) { _highlightAdorner.Clear(); return; }
+            lastLine = Math.Min(lastLine, lineCount - 1);
 
             int from = editor.GetCharacterIndexFromLineIndex(firstLine);
             int lastStart = editor.GetCharacterIndexFromLineIndex(lastLine);
@@ -1374,7 +1397,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         ed.Select(hit.Value.Index, hit.Value.Length);
-        ed.ScrollToLine(Math.Max(0, ed.GetLineIndexFromCharacterIndex(hit.Value.Index)));
+        ScrollToCharacter(ed, hit.Value.Index);
         if (!keepFocus) ed.Focus();
 
         Settings.RememberSearch(pattern);
@@ -1495,8 +1518,33 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         ed.CaretIndex = index;
         ed.SelectionLength = 0;
-        ed.ScrollToLine(Math.Max(0, ed.GetLineIndexFromCharacterIndex(index)));
+        ScrollToCharacter(ed, index);
         ed.Focus();
+    }
+
+    /// <summary>
+    /// Scrolls a character offset into view. A freshly hosted editor has not been laid out
+    /// yet and its line queries throw, so the scroll is retried once after layout.
+    /// </summary>
+    private void ScrollToCharacter(TextBox ed, int index)
+    {
+        if (!TryScrollToCharacter(ed, index))
+            Dispatcher.BeginInvoke(() => TryScrollToCharacter(ed, index), DispatcherPriority.Loaded);
+    }
+
+    private static bool TryScrollToCharacter(TextBox ed, int index)
+    {
+        try
+        {
+            if (ed.LineCount <= 0) return false;
+            int line = ed.GetLineIndexFromCharacterIndex(Math.Clamp(index, 0, ed.Text.Length));
+            ed.ScrollToLine(Math.Clamp(line, 0, ed.LineCount - 1));
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     /// <summary>

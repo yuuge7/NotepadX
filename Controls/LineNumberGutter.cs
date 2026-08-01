@@ -126,6 +126,12 @@ public sealed class LineNumberGutter : FrameworkElement
         double width = ActualWidth;
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, width, ActualHeight));
 
+        // Switching tabs reparents the editor, and until it has been laid out again its
+        // line queries report an empty document while GetFirstVisibleLineIndex still
+        // answers 0. Asking for line 0 of a zero-line box throws, so wait for the retry.
+        int visualLines = LineCountOf(editor);
+        if (visualLines <= 0) { ScheduleRetry(); return; }
+
         int firstVisual, lastVisual;
         try
         {
@@ -139,9 +145,11 @@ public sealed class LineNumberGutter : FrameworkElement
         }
 
         if (firstVisual < 0 || lastVisual < firstVisual) { ScheduleRetry(); return; }
+        if (firstVisual >= visualLines) { ScheduleRetry(); return; }
+        lastVisual = Math.Min(lastVisual, visualLines - 1);
 
         string text = editor.Text;
-        int firstChar = editor.GetCharacterIndexFromLineIndex(firstVisual);
+        int firstChar = CharacterIndexOfLine(editor, firstVisual);
         if (firstChar < 0) { ScheduleRetry(); return; }
 
         // One O(n) pass to place the first visible line, then increment while walking down.
@@ -155,12 +163,12 @@ public sealed class LineNumberGutter : FrameworkElement
 
         for (int visual = firstVisual; visual <= lastVisual; visual++)
         {
-            int charIndex = editor.GetCharacterIndexFromLineIndex(visual);
+            int charIndex = CharacterIndexOfLine(editor, visual);
             if (charIndex < 0) break;
 
             if (visual > firstVisual)
             {
-                int previous = editor.GetCharacterIndexFromLineIndex(visual - 1);
+                int previous = CharacterIndexOfLine(editor, visual - 1);
                 if (previous >= 0)
                 {
                     for (int i = previous; i < charIndex && i < text.Length; i++)
@@ -187,6 +195,32 @@ public sealed class LineNumberGutter : FrameworkElement
         var pen = new Pen(SeparatorBrush, 1);
         pen.Freeze();
         dc.DrawLine(pen, new Point(width - 0.5, 0), new Point(width - 0.5, ActualHeight));
+    }
+
+    /// <summary>Visual line count, or 0 when the editor has no usable layout yet.</summary>
+    private static int LineCountOf(TextBox editor)
+    {
+        try
+        {
+            return Math.Max(0, editor.LineCount);
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>Returns -1 instead of throwing when the layout moves under us mid-render.</summary>
+    private static int CharacterIndexOfLine(TextBox editor, int line)
+    {
+        try
+        {
+            return editor.GetCharacterIndexFromLineIndex(line);
+        }
+        catch (Exception)
+        {
+            return -1;
+        }
     }
 
     /// <summary>

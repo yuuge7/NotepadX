@@ -39,53 +39,72 @@ public sealed class MatchHighlightAdorner : Adorner
         double height = _editor.ActualHeight;
         if (width <= 0 || height <= 0) return;
 
+        // A tab switch reparents the editor; until it is laid out again every line query
+        // throws, so there is nothing meaningful to paint over it yet.
+        int lineCount = LineCount();
+        if (lineCount <= 0) return;
+
         dc.PushClip(new RectangleGeometry(new Rect(0, 0, width, height)));
 
         string text = _editor.Text;
         foreach (var hit in _hits)
         {
             if (hit.Index < 0 || hit.End > text.Length) continue;
-            DrawHit(dc, text, hit, height);
+            DrawHit(dc, hit, height, lineCount);
         }
 
         dc.Pop();
     }
 
     /// <summary>A match can straddle wrapped lines, so it is painted one visual row at a time.</summary>
-    private void DrawHit(DrawingContext dc, string text, SearchHit hit, double height)
+    private void DrawHit(DrawingContext dc, SearchHit hit, double height, int lineCount)
     {
-        int firstLine, lastLine;
         try
         {
-            firstLine = _editor.GetLineIndexFromCharacterIndex(hit.Index);
-            lastLine = _editor.GetLineIndexFromCharacterIndex(Math.Max(hit.Index, hit.End - 1));
+            int firstLine = _editor.GetLineIndexFromCharacterIndex(hit.Index);
+            int lastLine = _editor.GetLineIndexFromCharacterIndex(Math.Max(hit.Index, hit.End - 1));
+
+            if (firstLine < 0 || lastLine < firstLine) return;
+            if (firstLine >= lineCount) return;
+            lastLine = Math.Min(lastLine, lineCount - 1);
+
+            for (int line = firstLine; line <= lastLine; line++)
+            {
+                int lineStart = _editor.GetCharacterIndexFromLineIndex(line);
+                if (lineStart < 0) continue;
+
+                int lineLength = _editor.GetLineLength(line);
+                int segmentStart = Math.Max(hit.Index, lineStart);
+                int segmentEnd = Math.Min(hit.End, lineStart + lineLength);
+                if (segmentEnd <= segmentStart) continue;
+
+                var left = _editor.GetRectFromCharacterIndex(segmentStart);
+                var right = _editor.GetRectFromCharacterIndex(segmentEnd);
+                if (left.IsEmpty || right.IsEmpty) continue;
+                if (double.IsInfinity(left.Top) || double.IsInfinity(right.Left)) continue;
+                if (left.Top > height || left.Top + left.Height < 0) continue;
+
+                double w = Math.Max(1, right.Left - left.Left);
+                dc.DrawRoundedRectangle(HighlightBrush, null,
+                    new Rect(left.Left, left.Top, w, left.Height), 2, 2);
+            }
         }
         catch (Exception)
         {
-            return;
+            // Layout changed under the render pass; the next paint picks it up.
         }
+    }
 
-        if (firstLine < 0 || lastLine < firstLine) return;
-
-        for (int line = firstLine; line <= lastLine; line++)
+    /// <summary>Visual line count, or 0 when the editor has no usable layout yet.</summary>
+    private int LineCount()
+    {
+        try
         {
-            int lineStart = _editor.GetCharacterIndexFromLineIndex(line);
-            if (lineStart < 0) continue;
-
-            int lineLength = _editor.GetLineLength(line);
-            int segmentStart = Math.Max(hit.Index, lineStart);
-            int segmentEnd = Math.Min(hit.End, lineStart + lineLength);
-            if (segmentEnd <= segmentStart) continue;
-
-            var left = _editor.GetRectFromCharacterIndex(segmentStart);
-            var right = _editor.GetRectFromCharacterIndex(segmentEnd);
-            if (left.IsEmpty || right.IsEmpty) continue;
-            if (double.IsInfinity(left.Top) || double.IsInfinity(right.Left)) continue;
-            if (left.Top > height || left.Top + left.Height < 0) continue;
-
-            double w = Math.Max(1, right.Left - left.Left);
-            dc.DrawRoundedRectangle(HighlightBrush, null,
-                new Rect(left.Left, left.Top, w, left.Height), 2, 2);
+            return Math.Max(0, _editor.LineCount);
+        }
+        catch (Exception)
+        {
+            return 0;
         }
     }
 }
