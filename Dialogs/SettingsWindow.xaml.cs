@@ -27,6 +27,8 @@ public partial class SettingsWindow : Window
 
         VersionText.Text = "NotepadX " +
             (Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.0.0");
+
+        RefreshAssociationState();
     }
 
     private void PopulateFonts()
@@ -66,7 +68,10 @@ public partial class SettingsWindow : Window
         BoldCheck.IsChecked = S.FontBold;
         ItalicCheck.IsChecked = S.FontItalic;
         WrapCheck.IsChecked = S.WordWrap;
+        LineNumbersCheck.IsChecked = S.ShowLineNumbers;
         StatusCheck.IsChecked = S.ShowStatusBar;
+        WordCountCheck.IsChecked = S.ShowWordCount;
+        HighlightCheck.IsChecked = S.HighlightAllMatches;
         SpellCheckBox.IsChecked = S.SpellCheck;
         IndentCheck.IsChecked = S.AutoIndent;
 
@@ -101,7 +106,10 @@ public partial class SettingsWindow : Window
         BoldCheck.Click += (_, _) => { S.FontBold = BoldCheck.IsChecked == true; UpdatePreview(); };
         ItalicCheck.Click += (_, _) => { S.FontItalic = ItalicCheck.IsChecked == true; UpdatePreview(); };
         WrapCheck.Click += (_, _) => S.WordWrap = WrapCheck.IsChecked == true;
+        LineNumbersCheck.Click += (_, _) => S.ShowLineNumbers = LineNumbersCheck.IsChecked == true;
         StatusCheck.Click += (_, _) => S.ShowStatusBar = StatusCheck.IsChecked == true;
+        WordCountCheck.Click += (_, _) => S.ShowWordCount = WordCountCheck.IsChecked == true;
+        HighlightCheck.Click += (_, _) => S.HighlightAllMatches = HighlightCheck.IsChecked == true;
         SpellCheckBox.Click += (_, _) => S.SpellCheck = SpellCheckBox.IsChecked == true;
         IndentCheck.Click += (_, _) => S.AutoIndent = IndentCheck.IsChecked == true;
 
@@ -189,4 +197,48 @@ public partial class SettingsWindow : Window
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
+
+    // ------------------------------------------------------------------ file types
+
+    private void RefreshAssociationState()
+    {
+        bool registered = FileAssociation.IsRegistered();
+        AssociationState.Text = registered
+            ? "NotepadX is registered with Windows for text file types."
+            : "NotepadX is not registered with Windows yet.";
+
+        RegisterButton.IsEnabled = !registered;
+        UnregisterButton.IsEnabled = registered;
+    }
+
+    private void Register_Click(object sender, RoutedEventArgs e)
+    {
+        if (FileAssociation.Register(out string? error))
+        {
+            RefreshAssociationState();
+            MessageBox.Show(
+                "Registered.\n\n" +
+                "Windows does not allow an app to make itself the default — open Windows " +
+                "default apps and pick NotepadX for the types you want.",
+                "NotepadX", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        else
+        {
+            MessageBox.Show("Could not register:\n\n" + error, "NotepadX",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void Unregister_Click(object sender, RoutedEventArgs e)
+    {
+        if (FileAssociation.Unregister(out string? error)) RefreshAssociationState();
+        else
+        {
+            MessageBox.Show("Could not unregister:\n\n" + error, "NotepadX",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void OpenDefaultApps_Click(object sender, RoutedEventArgs e) =>
+        FileAssociation.OpenDefaultAppsSettings();
 }

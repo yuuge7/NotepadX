@@ -59,6 +59,51 @@ public static class TextFileIo
         _ => Utf8
     };
 
+    /// <summary>
+    /// Whether every character survives a round trip through this encoding. ANSI cannot
+    /// represent most of Unicode, and the default encoder silently substitutes '?', so
+    /// saving without this check loses data with no indication that anything happened.
+    /// </summary>
+    public static bool CanEncode(string text, TextEncodingInfo info, out int unmappableCount, out string sample)
+    {
+        unmappableCount = 0;
+        sample = "";
+
+        if (text.Length == 0) return true;
+
+        // Fast path: one pass that throws on the first character that will not fit.
+        var strict = (Encoding)info.Encoding.Clone();
+        strict.EncoderFallback = EncoderFallback.ExceptionFallback;
+
+        try
+        {
+            strict.GetByteCount(text);
+            return true;
+        }
+        catch (EncoderFallbackException)
+        {
+            // Fall through and work out how bad it is.
+        }
+
+        var offenders = new List<string>();
+        foreach (var rune in text.EnumerateRunes())
+        {
+            string s = rune.ToString();
+            try
+            {
+                strict.GetByteCount(s);
+            }
+            catch (EncoderFallbackException)
+            {
+                unmappableCount++;
+                if (offenders.Count < 8 && !offenders.Contains(s)) offenders.Add(s);
+            }
+        }
+
+        sample = string.Join(" ", offenders);
+        return unmappableCount == 0;
+    }
+
     public static LoadedFile Load(string path)
     {
         byte[] bytes = File.ReadAllBytes(path);

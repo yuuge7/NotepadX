@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:m="clr-namespace:NotepadX.Models"
+        xmlns:ctl="clr-namespace:NotepadX.Controls"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="{Binding WindowTitle}"
         Height="720" Width="1040" MinWidth="480" MinHeight="320"
@@ -38,6 +39,8 @@
                     Background="Transparent"
                     BorderThickness="1,1,1,0" BorderBrush="Transparent"
                     ToolTip="{Binding ToolTipText}"
+                    AutomationProperties.Name="{Binding AccessibleName}"
+                    AutomationProperties.ItemStatus="{Binding AccessibleStatus}"
                     shell:WindowChrome.IsHitTestVisibleInChrome="True">
                 <Grid Margin="12,0,6,0">
                     <Grid.ColumnDefinitions>
@@ -176,6 +179,7 @@
                         <MenuItem Header="Print..." InputGestureText="Ctrl+P" Command="{Binding PrintCommand}" />
                         <Separator />
                         <MenuItem Header="Close tab" InputGestureText="Ctrl+W" Command="{Binding CloseTabCommand}" />
+                        <MenuItem Header="Reopen closed tab" InputGestureText="Ctrl+Shift+T" Command="{Binding ReopenClosedTabCommand}" />
                         <MenuItem Header="Close window" InputGestureText="Ctrl+Shift+W" Command="{Binding CloseWindowCommand}" />
                         <MenuItem Header="Exit" Command="{Binding ExitCommand}" />
                     </MenuItem>
@@ -197,6 +201,24 @@
                         <Separator />
                         <MenuItem Header="Select all" InputGestureText="Ctrl+A" Command="{Binding SelectAllCommand}" />
                         <MenuItem Header="Time/Date" InputGestureText="F5" Command="{Binding TimeDateCommand}" />
+                        <Separator />
+                        <MenuItem Header="Text tools">
+                            <MenuItem Header="Sort lines A to Z" Command="{Binding TextToolCommand}" CommandParameter="sort" />
+                            <MenuItem Header="Sort lines Z to A" Command="{Binding TextToolCommand}" CommandParameter="sortdesc" />
+                            <MenuItem Header="Reverse line order" Command="{Binding TextToolCommand}" CommandParameter="reverse" />
+                            <Separator />
+                            <MenuItem Header="Remove duplicate lines" Command="{Binding TextToolCommand}" CommandParameter="dedupe" />
+                            <MenuItem Header="Remove empty lines" Command="{Binding TextToolCommand}" CommandParameter="noempty" />
+                            <MenuItem Header="Trim trailing whitespace" Command="{Binding TextToolCommand}" CommandParameter="trim" />
+                            <MenuItem Header="Join lines" Command="{Binding TextToolCommand}" CommandParameter="join" />
+                            <Separator />
+                            <MenuItem Header="UPPERCASE" Command="{Binding TextToolCommand}" CommandParameter="upper" />
+                            <MenuItem Header="lowercase" Command="{Binding TextToolCommand}" CommandParameter="lower" />
+                            <MenuItem Header="Title Case" Command="{Binding TextToolCommand}" CommandParameter="title" />
+                            <MenuItem Header="Invert case" Command="{Binding TextToolCommand}" CommandParameter="toggle" />
+                            <Separator />
+                            <MenuItem Header="Insert file path" Command="{Binding TextToolCommand}" CommandParameter="path" />
+                        </MenuItem>
                     </MenuItem>
 
                     <MenuItem Header="_View" Style="{StaticResource TopMenuItemStyle}">
@@ -206,8 +228,14 @@
                         <Separator />
                         <MenuItem Header="Word wrap" IsCheckable="True"
                                   IsChecked="{Binding Settings.WordWrap, Mode=TwoWay}" />
+                        <MenuItem Header="Line numbers" IsCheckable="True"
+                                  IsChecked="{Binding Settings.ShowLineNumbers, Mode=TwoWay}" />
                         <MenuItem Header="Status bar" IsCheckable="True"
                                   IsChecked="{Binding Settings.ShowStatusBar, Mode=TwoWay}" />
+                        <MenuItem Header="Word count in status bar" IsCheckable="True"
+                                  IsChecked="{Binding Settings.ShowWordCount, Mode=TwoWay}" />
+                        <MenuItem Header="Highlight all matches" IsCheckable="True"
+                                  IsChecked="{Binding Settings.HighlightAllMatches, Mode=TwoWay}" />
                         <MenuItem Header="Spell check" IsCheckable="True"
                                   IsChecked="{Binding Settings.SpellCheck, Mode=TwoWay}" />
                         <Separator />
@@ -253,7 +281,12 @@
                                  Tag="{StaticResource Glyph.Search}"
                                  KeyDown="FindBox_KeyDown" TextChanged="FindBox_TextChanged" />
 
-                        <Button Style="{StaticResource IconButtonStyle}" Margin="6,0,0,0"
+                        <Button x:Name="HistoryButton" Style="{StaticResource IconButtonStyle}"
+                                Width="26" FontSize="10" Margin="2,0,0,0"
+                                Content="{StaticResource Glyph.ChevronDown}"
+                                ToolTip="Recent searches" Click="FindHistory_Click" />
+
+                        <Button Style="{StaticResource IconButtonStyle}" Margin="4,0,0,0"
                                 Content="{StaticResource Glyph.ChevronUp}" ToolTip="Find previous (Shift+F3)"
                                 Command="{Binding FindPreviousCommand}" />
                         <Button Style="{StaticResource IconButtonStyle}"
@@ -263,13 +296,19 @@
                         <Rectangle Style="{StaticResource StatusSeparatorStyle}" Height="18" Margin="6,0" />
 
                         <ToggleButton x:Name="MatchCaseToggle" Style="{StaticResource IconToggleStyle}"
-                                      Content="Aa" ToolTip="Match case" />
+                                      Content="Aa" ToolTip="Match case"
+                                      Checked="SearchOption_Changed" Unchecked="SearchOption_Changed" />
                         <ToggleButton x:Name="WholeWordToggle" Style="{StaticResource IconToggleStyle}"
-                                      Content="ab" ToolTip="Match whole word" />
+                                      Content="ab" ToolTip="Match whole word"
+                                      Checked="SearchOption_Changed" Unchecked="SearchOption_Changed" />
+                        <ToggleButton x:Name="RegexToggle" Style="{StaticResource IconToggleStyle}"
+                                      Content=".*" ToolTip="Use a regular expression"
+                                      Checked="SearchOption_Changed" Unchecked="SearchOption_Changed" />
                         <ToggleButton x:Name="WrapAroundToggle" Style="{StaticResource IconToggleStyle}"
                                       ToolTip="Wrap around" IsChecked="True"
                                       FontFamily="{StaticResource IconFont}"
-                                      Content="{StaticResource Glyph.Wrap}" />
+                                      Content="{StaticResource Glyph.Wrap}"
+                                      Checked="SearchOption_Changed" Unchecked="SearchOption_Changed" />
 
                         <TextBlock x:Name="FindStatus" VerticalAlignment="Center" Margin="12,0,0,0"
                                    FontSize="12"
@@ -296,7 +335,17 @@
 
             <!-- ==================== EDITOR ==================== -->
             <Border Grid.Row="3" Background="{DynamicResource App.Surface}">
-                <ContentControl x:Name="EditorHost" Focusable="False" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <ctl:LineNumberGutter x:Name="Gutter" Grid.Column="0" Visibility="Collapsed"
+                                          Foreground="{DynamicResource App.TextTertiary}"
+                                          CurrentLineForeground="{DynamicResource App.Accent}"
+                                          SeparatorBrush="{DynamicResource App.Divider}" />
+                    <ContentControl x:Name="EditorHost" Grid.Column="1" Focusable="False" />
+                </Grid>
             </Border>
 
             <!-- ==================== STATUS BAR ==================== -->

@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Automation;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
@@ -13,6 +14,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using NotepadX.Controls;
 using NotepadX.Dialogs;
 using NotepadX.Interop;
 using NotepadX.Models;
@@ -34,6 +36,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly DispatcherTimer _statusTimer;
     private Point _dragStart;
     private DocumentTab? _dragTab;
+
+    /// <summary>Snapshots of recently closed tabs, newest last, for Ctrl+Shift+T.</summary>
+    private readonly List<ClosedTab> _closedTabs = [];
+    private const int ClosedTabLimit = 10;
+
+    private MatchHighlightAdorner? _highlightAdorner;
+    private bool _checkingDisk;
+
+    private sealed record ClosedTab(
+        string? FilePath, string Title, string Text, TextEncodingInfo Encoding,
+        LineEnding LineEnding, int CaretIndex, bool WasDirty);
 
     public ObservableCollection<DocumentTab> Documents { get; } = new();
     public AppSettings Settings => AppSettings.Current;
@@ -63,11 +76,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         StatusBarRoot.Visibility = Settings.ShowStatusBar ? Visibility.Visible : Visibility.Collapsed;
 
+        ApplyGutterVisibility();
+
         Drop += OnWindowDrop;
         DragOver += OnWindowDragOver;
         StateChanged += OnWindowStateChanged;
         Closing += OnWindowClosing;
         Closed += OnWindowClosed;
+        // Polling on focus rather than watching the filesystem: it catches every case that
+        // matters, costs one stat call, and cannot fire duplicate events off-thread.
+        Activated += OnWindowActivated;
     }
 
     // ==================================================================== window chrome
@@ -163,6 +181,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public ICommand NextTabCommand { get; private set; } = null!;
     public ICommand PreviousTabCommand { get; private set; } = null!;
     public ICommand SettingsCommand { get; private set; } = null!;
+    public ICommand ReopenClosedTabCommand { get; private set; } = null!;
+    public ICommand TextToolCommand { get; private set; } = null!;
 
     private void BuildCommands()
     {
@@ -223,6 +243,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         NextTabCommand = new RelayCommand(() => CycleTab(1));
         PreviousTabCommand = new RelayCommand(() => CycleTab(-1));
         SettingsCommand = new RelayCommand(OpenSettings);
+        ReopenClosedTabCommand = new RelayCommand(ReopenClosedTab, () => _closedTabs.Count > 0);
+        TextToolCommand = new RelayCommand(p => ApplyTextTool(p as string));
     }
 
     /// <summary>
@@ -276,6 +298,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         Bind(NextTabCommand, Key.Tab, ModifierKeys.Control);
         Bind(PreviousTabCommand, Key.Tab, ModifierKeys.Control | ModifierKeys.Shift);
+        Bind(ReopenClosedTabCommand, Key.T, ModifierKeys.Control | ModifierKeys.Shift);
         Bind(EscapeCommand, Key.Escape);
     }
 
@@ -296,6 +319,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             _activeTab = value;
 
+            DetachHighlighter();
+
             if (_activeTab is not null)
             {
                 _activeTab.IsActive = true;
@@ -305,11 +330,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 {
                     tab.Editor.ScrollToVerticalOffset(tab.ScrollOffset);
                     tab.Editor.Focus();
+                    Gutter.Attach(tab.Editor);
+                    AttachHighlighter(tab.Editor);
+                    RefreshHighlights();
                 }, DispatcherPriority.Loaded);
             }
             else
             {
                 EditorHost.Content = null;
+                Gutter.Attach(null);
             }
 
             OnPropertyChanged();
@@ -352,14 +381,91 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ed.SetResourceReference(TextBoxBase.CaretBrushProperty, "App.Text");
         ed.SelectionOpacity = 0.4;
 
+        AutomationProperties.SetName(ed, "Document text");
+
         ed.SelectionChanged += (_, _) => ScheduleStatus();
-        ed.TextChanged += (_, _) => { ScheduleStatus(); SchedulePersist(); };
+        // Highlights are recomputed after layout: right on TextChanged the editor cannot
+        // yet report which lines are visible.
+        ed.TextChanged += (_, _) =>
+        {
+            ScheduleStatus();
+            SchedulePersist();
+            Dispatcher.BeginInvoke(RefreshHighlights, DispatcherPriority.Loaded);
+        };
+        ed.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler((_, _) => RefreshHighlights()));
         ed.PreviewMouseWheel += Editor_PreviewMouseWheel;
         ed.PreviewKeyDown += Editor_PreviewKeyDown;
         ed.AllowDrop = true;
         ed.PreviewDragOver += OnEditorDragOver;
         ed.PreviewDrop += OnEditorDrop;
         ed.ContextMenu = BuildEditorContextMenu();
+    }
+
+    // ==================================================================== gutter & highlights
+
+    private void ApplyGutterVisibility()
+    {
+        Gutter.Visibility = Settings.ShowLineNumbers ? Visibility.Visible : Visibility.Collapsed;
+        if (Settings.ShowLineNumbers) Gutter.Attach(ActiveTab?.Editor);
+        Gutter.Refresh();
+    }
+
+    private void AttachHighlighter(TextBox editor)
+    {
+        var layer = AdornerLayer.GetAdornerLayer(editor);
+        if (layer is null) return;
+
+        _highlightAdorner = new MatchHighlightAdorner(editor);
+        if (TryFindResource("App.FindHighlight") is Brush brush) _highlightAdorner.HighlightBrush = brush;
+        layer.Add(_highlightAdorner);
+    }
+
+    private void DetachHighlighter()
+    {
+        if (_highlightAdorner is null) return;
+
+        var layer = AdornerLayer.GetAdornerLayer(_highlightAdorner.AdornedElement);
+        layer?.Remove(_highlightAdorner);
+        _highlightAdorner = null;
+    }
+
+    /// <summary>
+    /// Repaints the secondary match highlights. Only the visible character range is
+    /// scanned, so this stays cheap on a large document.
+    /// </summary>
+    private void RefreshHighlights()
+    {
+        if (_highlightAdorner is null) return;
+
+        var editor = ActiveTab?.Editor;
+        string pattern = FindBox?.Text ?? "";
+
+        if (editor is null || pattern.Length == 0 ||
+            FindBar.Visibility != Visibility.Visible ||
+            !Settings.HighlightAllMatches)
+        {
+            _highlightAdorner.Clear();
+            return;
+        }
+
+        try
+        {
+            int firstLine = editor.GetFirstVisibleLineIndex();
+            int lastLine = editor.GetLastVisibleLineIndex();
+            if (firstLine < 0 || lastLine < firstLine) { _highlightAdorner.Clear(); return; }
+
+            int from = editor.GetCharacterIndexFromLineIndex(firstLine);
+            int lastStart = editor.GetCharacterIndexFromLineIndex(lastLine);
+            if (from < 0 || lastStart < 0) { _highlightAdorner.Clear(); return; }
+
+            int to = Math.Min(editor.Text.Length, lastStart + editor.GetLineLength(lastLine));
+            var hits = DocumentSearch.FindInRange(editor.Text, pattern, CurrentSearchOptions, from, to - from);
+            _highlightAdorner.SetHits(hits);
+        }
+        catch (Exception)
+        {
+            _highlightAdorner.Clear();
+        }
     }
 
     private void CycleTab(int delta)
@@ -388,12 +494,120 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         int index = Documents.IndexOf(tab);
         if (index < 0) return;
 
+        RememberClosedTab(tab);
+
         tab.PropertyChanged -= OnTabPropertyChanged;
         Documents.Remove(tab);
         SessionStore.DeleteBuffer(tab.Id);
 
         if (ReferenceEquals(ActiveTab, tab))
             ActiveTab = Documents.Count == 0 ? null : Documents[Math.Min(index, Documents.Count - 1)];
+    }
+
+    private void RememberClosedTab(DocumentTab tab)
+    {
+        string text = tab.Editor.Text;
+        if (!tab.HasFile && text.Length == 0) return;   // nothing worth bringing back
+
+        _closedTabs.Add(new ClosedTab(
+            tab.FilePath, tab.Title, text, tab.Encoding, tab.LineEnding,
+            tab.Editor.CaretIndex, tab.IsDirty));
+
+        if (_closedTabs.Count > ClosedTabLimit) _closedTabs.RemoveAt(0);
+    }
+
+    private void ReopenClosedTab()
+    {
+        if (_closedTabs.Count == 0) return;
+
+        var closed = _closedTabs[^1];
+        _closedTabs.RemoveAt(_closedTabs.Count - 1);
+
+        // A saved file that still exists is reopened from disk so it is current; an
+        // unsaved buffer comes back exactly as it was.
+        if (!closed.WasDirty && closed.FilePath is not null && File.Exists(closed.FilePath))
+        {
+            OpenFiles([closed.FilePath]);
+            if (ActiveTab is not null)
+                ActiveTab.Editor.CaretIndex = Math.Clamp(closed.CaretIndex, 0, ActiveTab.Editor.Text.Length);
+            return;
+        }
+
+        var tab = NewTab(activate: true, title: closed.Title);
+        tab.SetTextSilently(closed.Text);
+        tab.Encoding = closed.Encoding;
+        tab.LineEnding = closed.LineEnding;
+        if (closed.FilePath is not null)
+        {
+            tab.FilePath = closed.FilePath;
+            tab.Title = closed.Title;
+            tab.MarkSynchronized();
+        }
+        tab.IsDirty = closed.WasDirty;
+        tab.Editor.CaretIndex = Math.Clamp(closed.CaretIndex, 0, tab.Editor.Text.Length);
+        SchedulePersist();
+    }
+
+    // ==================================================================== text tools
+
+    /// <summary>
+    /// Applies a transform to the selection, or to the whole document when nothing is
+    /// selected. Going through SelectedText keeps every one of these undoable in one step.
+    /// </summary>
+    private void ApplyTextTool(string? tool)
+    {
+        var tab = ActiveTab;
+        var ed = tab?.Editor;
+        if (tab is null || ed is null || tool is null) return;
+        if (!EnsureWritable(tab)) return;
+
+        if (tool == "path")
+        {
+            ed.SelectedText = tab.FilePath ?? tab.Title;
+            ed.CaretIndex = ed.SelectionStart + ed.SelectionLength;
+            ed.SelectionLength = 0;
+            ed.Focus();
+            return;
+        }
+
+        bool wholeDocument = ed.SelectionLength == 0;
+        string input = wholeDocument ? ed.Text : ed.SelectedText;
+        if (input.Length == 0) return;
+
+        string output = tool switch
+        {
+            "sort" => TextTools.SortLines(input),
+            "sortdesc" => TextTools.SortLines(input, descending: true),
+            "reverse" => TextTools.ReverseLines(input),
+            "dedupe" => TextTools.RemoveDuplicateLines(input),
+            "noempty" => TextTools.RemoveEmptyLines(input),
+            "trim" => TextTools.TrimTrailingWhitespace(input),
+            "join" => TextTools.JoinLines(input),
+            "upper" => TextTools.ToUpper(input),
+            "lower" => TextTools.ToLower(input),
+            "title" => TextTools.ToTitleCase(input),
+            "toggle" => TextTools.ToggleCase(input),
+            _ => input
+        };
+
+        if (output == input) return;
+
+        if (wholeDocument)
+        {
+            int caret = ed.CaretIndex;
+            ed.SelectAll();
+            ed.SelectedText = output;
+            ed.CaretIndex = Math.Clamp(caret, 0, ed.Text.Length);
+            ed.SelectionLength = 0;
+        }
+        else
+        {
+            int at = ed.SelectionStart;
+            ed.SelectedText = output;
+            ed.Select(at, output.Length);
+        }
+
+        ed.Focus();
     }
 
     /// <summary>Returns false when the user cancels out of the save prompt.</summary>
@@ -470,6 +684,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 continue;
             }
 
+            if (!ConfirmLargeFile(full)) continue;
+
             try
             {
                 var loaded = TextFileIo.Load(full);
@@ -479,6 +695,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 target.LineEnding = loaded.LineEnding;
                 target.FilePath = full;
                 target.Title = Path.GetFileName(full);
+                target.MarkSynchronized();
                 last = target;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
@@ -490,6 +707,139 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         if (last is not null) ActiveTab = last;
         SchedulePersist();
+    }
+
+    /// <summary>
+    /// The editor is a plain TextBox, which holds the whole document in one run. Past a
+    /// few tens of megabytes typing becomes visibly slow, so say so before opening rather
+    /// than after the window has frozen.
+    /// </summary>
+    private bool ConfirmLargeFile(string path)
+    {
+        int limitMb = Settings.LargeFileWarningMb;
+        if (limitMb <= 0) return true;
+
+        try
+        {
+            long bytes = new FileInfo(path).Length;
+            if (bytes < limitMb * 1024L * 1024L) return true;
+
+            double mb = bytes / (1024.0 * 1024.0);
+            var answer = MessageBox.Show(
+                $"{Path.GetFileName(path)} is {mb:N0} MB.\n\n" +
+                "NotepadX keeps the whole file in memory, so editing a file this large will be slow.\n\n" +
+                "Open it anyway?",
+                AppName, MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+            return answer == MessageBoxResult.Yes;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Blocks edits to a file marked read-only, offering to clear the attribute. Returns
+    /// false when the caller should abandon the change.
+    /// </summary>
+    private bool EnsureWritable(DocumentTab tab)
+    {
+        if (!tab.IsReadOnly || tab.FilePath is null) return true;
+
+        var answer = MessageBox.Show(
+            $"{tab.Title} is marked read-only.\n\nRemove the read-only attribute and continue?",
+            AppName, MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+        if (answer != MessageBoxResult.Yes) return false;
+
+        try
+        {
+            var info = new FileInfo(tab.FilePath) { IsReadOnly = false };
+            tab.IsReadOnly = info.IsReadOnly;
+            return !tab.IsReadOnly;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show($"Cannot clear the read-only attribute:\n\n{ex.Message}",
+                AppName, MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Compares the file on disk against what this tab last read or wrote. Runs when the
+    /// window regains focus, which is when a change made elsewhere becomes relevant.
+    /// </summary>
+    private void OnWindowActivated(object? sender, EventArgs e)
+    {
+        if (_checkingDisk || _closing) return;
+
+        _checkingDisk = true;
+        try
+        {
+            foreach (var tab in Documents.ToList())
+            {
+                if (tab.ReloadPromptOpen || !tab.HasChangedOnDisk()) continue;
+                HandleExternalChange(tab);
+            }
+        }
+        finally
+        {
+            _checkingDisk = false;
+        }
+    }
+
+    private void HandleExternalChange(DocumentTab tab)
+    {
+        if (tab.FilePath is null) return;
+
+        tab.ReloadPromptOpen = true;
+        try
+        {
+            if (!tab.IsDirty)
+            {
+                // Nothing of the user's to lose, so take the newer content.
+                ReloadFromDisk(tab);
+                return;
+            }
+
+            var answer = MessageBox.Show(
+                $"{tab.Title} was changed by another program, and this tab has unsaved edits.\n\n" +
+                "Reload from disk and discard your changes?",
+                AppName, MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+            if (answer == MessageBoxResult.Yes) ReloadFromDisk(tab);
+            else tab.MarkSynchronized();   // user keeps their copy; stop asking about this version
+        }
+        finally
+        {
+            tab.ReloadPromptOpen = false;
+        }
+    }
+
+    private void ReloadFromDisk(DocumentTab tab)
+    {
+        if (tab.FilePath is null) return;
+        try
+        {
+            int caret = tab.Editor.CaretIndex;
+            double scroll = tab.Editor.VerticalOffset;
+
+            var loaded = TextFileIo.Load(tab.FilePath);
+            tab.SetTextSilently(loaded.Text);
+            tab.Encoding = loaded.Encoding;
+            tab.LineEnding = loaded.LineEnding;
+            tab.MarkSynchronized();
+
+            tab.Editor.CaretIndex = Math.Clamp(caret, 0, tab.Editor.Text.Length);
+            tab.Editor.ScrollToVerticalOffset(scroll);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show($"Cannot reload {tab.Title}:\n\n{ex.Message}",
+                AppName, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     /// <summary>An untouched "Untitled" tab is recycled instead of piling up empties.</summary>
@@ -522,13 +872,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (dlg.ShowDialog(this) != true) return false;
             path = dlg.FileName;
         }
+        else
+        {
+            if (!EnsureWritable(tab)) return false;
+            if (!ConfirmOverwriteExternalChange(tab)) return false;
+        }
+
+        var encoding = tab.Encoding;
+        if (!ConfirmEncoding(tab, ref encoding)) return false;
 
         try
         {
-            TextFileIo.Save(path!, tab.Editor.Text, tab.Encoding, tab.LineEnding);
+            TextFileIo.Save(path!, tab.Editor.Text, encoding, tab.LineEnding);
+            tab.Encoding = encoding;
             tab.FilePath = path;
             tab.Title = Path.GetFileName(path!);
             tab.IsDirty = false;
+            tab.MarkSynchronized();
             SessionStore.DeleteBuffer(tab.Id);
             SchedulePersist();
             return true;
@@ -539,6 +899,50 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 AppName, MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
+    }
+
+    /// <summary>
+    /// ANSI and other legacy code pages cannot represent most of Unicode, and the default
+    /// encoder quietly substitutes '?'. Saying so is the difference between a warning and
+    /// silent data loss.
+    /// </summary>
+    private bool ConfirmEncoding(DocumentTab tab, ref TextEncodingInfo encoding)
+    {
+        if (TextFileIo.CanEncode(tab.Editor.Text, encoding, out int count, out string sample)) return true;
+
+        string detail = string.IsNullOrEmpty(sample) ? "" : $"\n\nFor example: {sample}";
+        var answer = MessageBox.Show(
+            $"{count:N0} character{(count == 1 ? "" : "s")} cannot be written as {encoding.Name} " +
+            $"and would be replaced with '?'.{detail}\n\n" +
+            "Save as UTF-8 instead, keeping every character?\n\n" +
+            "Yes — save as UTF-8\n" +
+            "No — save as " + encoding.Name + " and lose them\n" +
+            "Cancel — go back",
+            AppName, MessageBoxButton.YesNoCancel, MessageBoxImage.Warning);
+
+        switch (answer)
+        {
+            case MessageBoxResult.Yes:
+                encoding = TextFileIo.Utf8;
+                return true;
+            case MessageBoxResult.No:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>Last line of defence against clobbering an edit made by another program.</summary>
+    private bool ConfirmOverwriteExternalChange(DocumentTab tab)
+    {
+        if (!tab.HasChangedOnDisk()) return true;
+
+        var answer = MessageBox.Show(
+            $"{tab.Title} was changed by another program since you opened it.\n\n" +
+            "Saving now overwrites those changes. Continue?",
+            AppName, MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+        return answer == MessageBoxResult.Yes;
     }
 
     private void OpenNewWindow()
@@ -634,6 +1038,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _zoom = Math.Clamp(Math.Round(value, 2), 0.2, 5.0);
         foreach (var tab in Documents) tab.ApplyOptions(Settings, _zoom);
         Settings.Zoom = _zoom;
+        Gutter.Refresh();
+        RefreshHighlights();
         OnPropertyChanged(nameof(StatusZoom));
     }
 
@@ -707,9 +1113,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         int col = caret - lineStart + 1;
 
         StatusPosition = $"Ln {line}, Col {col}";
-        StatusLeft = ed.SelectionLength > 0
+
+        var status = new StringBuilder();
+        status.Append(ed.SelectionLength > 0
             ? $"{ed.SelectionLength:N0} selected of {text.Length:N0} characters"
-            : $"{text.Length:N0} characters";
+            : $"{text.Length:N0} characters");
+
+        if (Settings.ShowWordCount)
+        {
+            string counted = ed.SelectionLength > 0 ? ed.SelectedText : text;
+            status.Append($"   ·   {TextTools.CountWords(counted):N0} words");
+        }
+
+        if (tab.IsReadOnly) status.Append("   ·   Read-only");
+
+        StatusLeft = status.ToString();
 
         OnPropertyChanged(nameof(WindowTitle));
     }
@@ -879,148 +1297,160 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         else if (e.Key == Key.Escape) { HideFindBar(); e.Handled = true; }
     }
 
-    private bool MatchCase => MatchCaseToggle.IsChecked == true;
-    private bool WholeWord => WholeWordToggle.IsChecked == true;
     private bool WrapAround => WrapAroundToggle.IsChecked == true;
+
+    private SearchOptions CurrentSearchOptions => new(
+        MatchCase: MatchCaseToggle.IsChecked == true,
+        WholeWord: WholeWordToggle.IsChecked == true,
+        UseRegex: RegexToggle.IsChecked == true);
+
+    private void SearchOption_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        UpdateMatchCount();
+        RefreshHighlights();
+    }
+
+    private void FindHistory_Click(object sender, RoutedEventArgs e)
+    {
+        var history = Settings.FindHistory;
+        var menu = new ContextMenu
+        {
+            Style = (Style)FindResource("AppContextMenuStyle"),
+            PlacementTarget = (FrameworkElement)sender,
+            Placement = PlacementMode.Bottom
+        };
+
+        if (history.Count == 0)
+        {
+            menu.Items.Add(new MenuItem { Header = "No recent searches", IsEnabled = false });
+        }
+        else
+        {
+            foreach (var term in history)
+            {
+                var item = new MenuItem { Header = term };
+                item.Click += (_, _) =>
+                {
+                    FindBox.Text = term;
+                    FindBox.CaretIndex = term.Length;
+                    FindBox.Focus();
+                };
+                menu.Items.Add(item);
+            }
+            menu.Items.Add(new Separator());
+            var clear = new MenuItem { Header = "Clear history" };
+            clear.Click += (_, _) => { Settings.FindHistory = []; Settings.Save(); };
+            menu.Items.Add(clear);
+        }
+
+        menu.IsOpen = true;
+    }
 
     private void FindStep(bool up, bool fromCaret, bool keepFocus = false)
     {
         var ed = ActiveTab?.Editor;
-        string term = FindBox.Text;
-        if (ed is null || term.Length == 0) return;
+        string pattern = FindBox.Text;
+        if (ed is null || pattern.Length == 0) return;
+
+        var options = CurrentSearchOptions;
+        if (DocumentSearch.TryBuild(pattern, options, out string? error) is null)
+        {
+            FindStatus.Text = error is null ? "" : "Invalid pattern";
+            _highlightAdorner?.Clear();
+            return;
+        }
 
         string text = ed.Text;
         int start = fromCaret
-            ? (up ? ed.SelectionStart - 1 : ed.SelectionStart + ed.SelectionLength)
+            ? (up ? ed.SelectionStart : ed.SelectionStart + Math.Max(1, ed.SelectionLength))
             : ed.SelectionStart;
 
-        int index = Search(text, term, start, up);
-
-        if (index < 0 && WrapAround)
-            index = Search(text, term, up ? text.Length : 0, up);
-
-        if (index < 0)
+        var hit = DocumentSearch.FindWrapped(text, pattern, start, up, options, WrapAround);
+        if (hit is null)
         {
             FindStatus.Text = "No results";
             return;
         }
 
-        ed.Select(index, term.Length);
-        ed.ScrollToLine(Math.Max(0, ed.GetLineIndexFromCharacterIndex(index)));
+        ed.Select(hit.Value.Index, hit.Value.Length);
+        ed.ScrollToLine(Math.Max(0, ed.GetLineIndexFromCharacterIndex(hit.Value.Index)));
         if (!keepFocus) ed.Focus();
+
+        Settings.RememberSearch(pattern);
         UpdateMatchCount();
+        RefreshHighlights();
     }
-
-    private int Search(string text, string term, int start, bool up)
-    {
-        var cmp = MatchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-
-        if (up)
-        {
-            int from = Math.Min(start, text.Length - 1);
-            while (from >= 0)
-            {
-                int i = text.LastIndexOf(term, from, cmp);
-                if (i < 0) return -1;
-                if (!WholeWord || IsWholeWord(text, i, term.Length)) return i;
-                from = i - 1;
-            }
-            return -1;
-        }
-
-        int pos = Math.Max(0, Math.Min(start, text.Length));
-        while (pos <= text.Length - term.Length)
-        {
-            int i = text.IndexOf(term, pos, cmp);
-            if (i < 0) return -1;
-            if (!WholeWord || IsWholeWord(text, i, term.Length)) return i;
-            pos = i + 1;
-        }
-        return -1;
-    }
-
-    private static bool IsWholeWord(string text, int index, int length)
-    {
-        bool leftOk = index == 0 || !IsWordChar(text[index - 1]);
-        int end = index + length;
-        bool rightOk = end >= text.Length || !IsWordChar(text[end]);
-        return leftOk && rightOk;
-    }
-
-    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
 
     private void UpdateMatchCount()
     {
         var ed = ActiveTab?.Editor;
-        string term = FindBox.Text;
-        if (ed is null || term.Length == 0) { FindStatus.Text = ""; return; }
+        string pattern = FindBox.Text;
+        if (ed is null || pattern.Length == 0) { FindStatus.Text = ""; return; }
 
-        int count = 0, pos = 0;
-        string text = ed.Text;
-        var cmp = MatchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-        while (pos <= text.Length - term.Length)
+        var options = CurrentSearchOptions;
+        if (DocumentSearch.TryBuild(pattern, options, out _) is null)
         {
-            int i = text.IndexOf(term, pos, cmp);
-            if (i < 0) break;
-            if (!WholeWord || IsWholeWord(text, i, term.Length)) count++;
-            pos = i + 1;
+            FindStatus.Text = "Invalid pattern";
+            return;
         }
+
+        int count = DocumentSearch.Count(ed.Text, pattern, options);
         FindStatus.Text = count == 0 ? "No results" : count + (count == 1 ? " result" : " results");
     }
 
     private void ReplaceOne()
     {
         var ed = ActiveTab?.Editor;
-        string term = FindBox.Text;
-        if (ed is null || term.Length == 0) return;
+        string pattern = FindBox.Text;
+        if (ed is null || pattern.Length == 0) return;
+        if (!EnsureWritable(ActiveTab!)) return;
 
-        var cmp = MatchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-        if (ed.SelectionLength == term.Length && string.Equals(ed.SelectedText, term, cmp))
+        var options = CurrentSearchOptions;
+        var hit = DocumentSearch.Find(ed.Text, pattern, ed.SelectionStart, backwards: false, options);
+
+        // Only replace when the selection is exactly the match under the caret; otherwise
+        // this acts as "find next" so the first press never overwrites something else.
+        if (hit is { } current && current.Index == ed.SelectionStart && current.Length == ed.SelectionLength)
         {
+            string replacement = DocumentSearch.ExpandReplacement(ed.Text, current, pattern, ReplaceBox.Text, options);
             int at = ed.SelectionStart;
-            ed.SelectedText = ReplaceBox.Text;
-            ed.Select(at + ReplaceBox.Text.Length, 0);
+            ed.SelectedText = replacement;
+            ed.Select(at + replacement.Length, 0);
         }
+
+        Settings.RememberSearch(pattern);
         FindStep(up: false, fromCaret: true, keepFocus: true);
     }
 
     private void ReplaceAll()
     {
         var ed = ActiveTab?.Editor;
-        string term = FindBox.Text;
-        if (ed is null || term.Length == 0) return;
+        string pattern = FindBox.Text;
+        if (ed is null || pattern.Length == 0) return;
+        if (!EnsureWritable(ActiveTab!)) return;
 
-        string text = ed.Text;
-        string replacement = ReplaceBox.Text;
-        var cmp = MatchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-
-        var sb = new StringBuilder(text.Length);
-        int pos = 0, replaced = 0;
-        while (pos <= text.Length - term.Length)
+        var options = CurrentSearchOptions;
+        if (DocumentSearch.TryBuild(pattern, options, out _) is null)
         {
-            int i = text.IndexOf(term, pos, cmp);
-            if (i < 0) break;
-            if (WholeWord && !IsWholeWord(text, i, term.Length))
-            {
-                sb.Append(text, pos, i - pos + 1);
-                pos = i + 1;
-                continue;
-            }
-            sb.Append(text, pos, i - pos).Append(replacement);
-            pos = i + term.Length;
-            replaced++;
+            FindStatus.Text = "Invalid pattern";
+            return;
         }
-        sb.Append(text, pos, text.Length - pos);
+
+        string result = DocumentSearch.ReplaceAll(ed.Text, pattern, ReplaceBox.Text, options, out int replaced);
 
         if (replaced > 0)
         {
             int caret = ed.CaretIndex;
             ed.SelectAll();
-            ed.SelectedText = sb.ToString();
+            ed.SelectedText = result;
             ed.CaretIndex = Math.Min(caret, ed.Text.Length);
             ed.SelectionLength = 0;
         }
+
+        Settings.RememberSearch(pattern);
         FindStatus.Text = replaced == 0 ? "No results" : $"Replaced {replaced}";
+        RefreshHighlights();
     }
 
     private void GoToLine()
@@ -1039,6 +1469,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (dlg.ShowDialog() != true) return;
         if (!int.TryParse(dlg.Value.Trim(), out int target)) return;
 
+        GoToLine(target);
+    }
+
+    /// <summary>Moves the caret to a 1-based line. Also used by the <c>file:42</c> argument.</summary>
+    public void GoToLine(int target)
+    {
+        var ed = ActiveTab?.Editor;
+        if (ed is null) return;
+
+        string text = ed.Text;
+        int totalLines = 1;
+        foreach (char c in text) if (c == '\n') totalLines++;
+
         target = Math.Clamp(target, 1, totalLines);
 
         int index = 0, line = 1;
@@ -1056,15 +1499,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ed.Focus();
     }
 
+    /// <summary>
+    /// Opens files, honouring any <c>:line</c> suffix. Returns the tab of the last file.
+    /// </summary>
+    public void OpenRequests(IReadOnlyList<FileRequest> requests)
+    {
+        foreach (var request in requests)
+        {
+            OpenFiles([request.Path]);
+            if (request.Line is int line) GoToLine(line);
+        }
+    }
+
     // ==================================================================== printing
 
-    private void PrintActive()
+    private void PrintActive() => PrintTab(ActiveTab, prompt: true);
+
+    /// <summary>Prints a tab. With <paramref name="prompt"/> false it goes to the default printer.</summary>
+    public void PrintTab(DocumentTab? tab, bool prompt)
     {
-        var tab = ActiveTab;
         if (tab is null) return;
 
         var dlg = new PrintDialog();
-        if (dlg.ShowDialog() != true) return;
+        if (prompt && dlg.ShowDialog() != true) return;
 
         var doc = new FlowDocument(new Paragraph(new Run(tab.Editor.Text)))
         {
@@ -1281,11 +1738,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 StatusBarRoot.Visibility = Settings.ShowStatusBar ? Visibility.Visible : Visibility.Collapsed;
                 break;
 
+            case nameof(AppSettings.ShowLineNumbers):
+                ApplyGutterVisibility();
+                break;
+
+            case nameof(AppSettings.ShowWordCount):
+                UpdateStatus();
+                break;
+
+            case nameof(AppSettings.HighlightAllMatches):
+                RefreshHighlights();
+                break;
+
+            case nameof(AppSettings.FindHistory):
+                return;   // written straight to disk below without touching the editors
+
             case nameof(AppSettings.Zoom):
                 return;   // already applied by SetZoom, and it is written out on close
 
             default:
                 foreach (var tab in Documents) tab.ApplyOptions(Settings, _zoom);
+                Gutter.Refresh();
                 break;
         }
         Settings.Save();
@@ -1403,6 +1876,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     tab.Encoding = loaded.Encoding;
                     tab.LineEnding = loaded.LineEnding;
                     tab.FilePath = st.FilePath;
+                    tab.MarkSynchronized();
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {

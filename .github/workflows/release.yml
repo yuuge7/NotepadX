@@ -79,6 +79,9 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=v$version"
           Write-Host "releasing NotepadX v$version"
 
+      - name: Test
+        run: dotnet test tests/NotepadX.Tests/NotepadX.Tests.csproj -c Release --verbosity normal
+
       - name: Build x64
         shell: pwsh
         run: ./build.ps1 -Arch x64 -Version '${{ steps.version.outputs.version }}'
@@ -110,6 +113,40 @@ jobs:
             if (Test-Path $pfx) { Remove-Item $pfx -Force }
           }
 
+      - name: Build MSI installer
+        shell: pwsh
+        run: ./packaging/build-msi.ps1 -Version '${{ steps.version.outputs.version }}' -Arch x64
+
+      - name: Sign installer
+        if: ${{ env.SIGNING_CERT_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $msi = "dist/x64/NotepadX-v$version-win-x64.msi"
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT_BASE64))
+            $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
+              $pfx, $env:SIGNING_CERT_PASSWORD, $flags)
+
+            $r = Set-AuthenticodeSignature -FilePath $msi -Certificate $cert `
+                   -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com'
+            Write-Host "$msi -> $($r.Status)"
+            if ($r.Status -in 'HashMismatch', 'NotSigned') { throw "signing failed for $msi" }
+          }
+          finally {
+            if (Test-Path $pfx) { Remove-Item $pfx -Force }
+          }
+
+      - name: Generate winget manifests
+        shell: pwsh
+        run: |
+          ./packaging/make-winget-manifests.ps1 `
+            -Version '${{ steps.version.outputs.version }}' `
+            -Owner '${{ github.repository_owner }}' `
+            -Repo '${{ github.event.repository.name }}'
+
       - name: Package artifacts
         shell: pwsh
         run: |
@@ -119,6 +156,13 @@ jobs:
           foreach ($arch in 'x64', 'arm64') {
             Copy-Item "dist/$arch/NotepadX.exe" "artifacts/NotepadX-v$version-win-$arch.exe"
           }
+
+          Copy-Item "dist/x64/NotepadX-v$version-win-x64.msi" "artifacts/"
+
+          # The winget manifests ride along with the release so the winget-pkgs pull
+          # request can be assembled without rebuilding anything.
+          Compress-Archive -Path "dist/winget/$version/*" `
+                           -DestinationPath "artifacts/NotepadX-v$version-winget-manifests.zip" -Force
 
           # Portable variant: same binary, but it keeps its data next to itself
           New-Item -ItemType Directory -Path portable -Force | Out-Null
@@ -147,11 +191,13 @@ jobs:
 
           | File | For |
           | --- | --- |
-          | `NotepadX-vVERSION-win-x64.exe` | Windows 10 (1809+) and Windows 11, 64-bit |
-          | `NotepadX-vVERSION-win-arm64.exe` | Windows on ARM |
+          | `NotepadX-vVERSION-win-x64.exe` | Windows 10 (1809+) and Windows 11, 64-bit — no install |
+          | `NotepadX-vVERSION-win-arm64.exe` | Windows on ARM — no install |
+          | `NotepadX-vVERSION-win-x64.msi` | Installer: Start menu entry, Open with, clean uninstall |
           | `NotepadX-vVERSION-win-x64-portable.zip` | Same app, keeps its settings beside the executable |
 
-          No installer and no .NET runtime needed — download and run.
+          The `.exe` downloads need no .NET runtime and no administrator rights — download
+          and run. The MSI installs per user, so it does not prompt for elevation either.
 
           Verify a download against `SHA256SUMS.txt`:
 

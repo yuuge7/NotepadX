@@ -100,7 +100,10 @@
                 <Border Style="{StaticResource Card}">
                     <StackPanel>
                         <CheckBox x:Name="WrapCheck" Content="Word wrap" Margin="0,0,0,8" />
+                        <CheckBox x:Name="LineNumbersCheck" Content="Show line numbers" Margin="0,0,0,8" />
                         <CheckBox x:Name="StatusCheck" Content="Show status bar" Margin="0,0,0,8" />
+                        <CheckBox x:Name="WordCountCheck" Content="Show word count in the status bar" Margin="0,0,0,8" />
+                        <CheckBox x:Name="HighlightCheck" Content="Highlight every search match" Margin="0,0,0,8" />
                         <CheckBox x:Name="SpellCheckBox" Content="Spell check (offline Windows dictionary)" Margin="0,0,0,8" />
                         <CheckBox x:Name="IndentCheck" Content="Keep indentation on new lines" />
                     </StackPanel>
@@ -157,6 +160,20 @@
                                 <ComboBoxItem Content="Unix (LF)" />
                             </ComboBox>
                         </Grid>
+                    </StackPanel>
+                </Border>
+
+                <TextBlock Text="Default app" Style="{StaticResource SectionTitle}" />
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <TextBlock x:Name="AssociationState" Style="{StaticResource RowLabel}" />
+                        <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,0"
+                                   Text="Registering adds NotepadX to the Open with list and to Windows Settings. Windows itself will not let an app take over a file type — the last step is yours to confirm." />
+                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                            <Button x:Name="RegisterButton" Content="Register file types" Padding="12,5" Margin="0,0,8,0" Click="Register_Click" />
+                            <Button x:Name="UnregisterButton" Content="Unregister" Padding="12,5" Margin="0,0,8,0" Click="Unregister_Click" />
+                            <Button Content="Open Windows default apps" Padding="12,5" Click="OpenDefaultApps_Click" />
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 

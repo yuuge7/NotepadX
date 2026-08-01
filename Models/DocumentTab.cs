@@ -17,6 +17,7 @@ public sealed class DocumentTab : INotifyPropertyChanged
     private string? _filePath;
     private bool _isDirty;
     private bool _isActive;
+    private bool _isReadOnly;
     private TextEncodingInfo _encoding = TextFileIo.Utf8;
     private LineEnding _lineEnding = LineEnding.Crlf;
 
@@ -29,6 +30,16 @@ public sealed class DocumentTab : INotifyPropertyChanged
 
     /// <summary>Set when the user answered "Don't save", so nothing is kept for recovery.</summary>
     public bool Discarded { get; set; }
+
+    /// <summary>
+    /// Size and timestamp of the file as this tab last read or wrote it. Comparing against
+    /// the file on disk is how an edit made by another program gets noticed.
+    /// </summary>
+    public DateTime DiskWriteTimeUtc { get; private set; }
+    public long DiskLength { get; private set; } = -1;
+
+    /// <summary>Suppresses repeat prompts while one reload question is already on screen.</summary>
+    public bool ReloadPromptOpen { get; set; }
 
     public DocumentTab()
     {
@@ -53,10 +64,24 @@ public sealed class DocumentTab : INotifyPropertyChanged
     public string Title
     {
         get => _title;
-        set { if (Set(ref _title, value)) OnPropertyChanged(nameof(DisplayTitle)); }
+        set
+        {
+            if (!Set(ref _title, value)) return;
+            OnPropertyChanged(nameof(DisplayTitle));
+            OnPropertyChanged(nameof(AccessibleName));
+        }
     }
 
     public string DisplayTitle => IsDirty ? Title + "*" : Title;
+
+    /// <summary>
+    /// What a screen reader announces for this tab. Without it the automation tree
+    /// reports the class name, which is useless.
+    /// </summary>
+    public string AccessibleName => Title;
+
+    public string AccessibleStatus =>
+        (IsDirty ? "Unsaved changes. " : "") + (IsReadOnly ? "Read-only. " : "");
 
     public string? FilePath
     {
@@ -72,18 +97,69 @@ public sealed class DocumentTab : INotifyPropertyChanged
 
     public bool HasFile => !string.IsNullOrEmpty(FilePath);
 
-    public string ToolTipText => FilePath ?? Title;
+    public string ToolTipText => (FilePath ?? Title) + (IsReadOnly ? "  (read-only)" : "");
 
     public bool IsDirty
     {
         get => _isDirty;
-        set { if (Set(ref _isDirty, value)) OnPropertyChanged(nameof(DisplayTitle)); }
+        set
+        {
+            if (!Set(ref _isDirty, value)) return;
+            OnPropertyChanged(nameof(DisplayTitle));
+            OnPropertyChanged(nameof(AccessibleStatus));
+        }
     }
 
     public bool IsActive
     {
         get => _isActive;
         set => Set(ref _isActive, value);
+    }
+
+    public bool IsReadOnly
+    {
+        get => _isReadOnly;
+        set
+        {
+            if (!Set(ref _isReadOnly, value)) return;
+            OnPropertyChanged(nameof(ToolTipText));
+            OnPropertyChanged(nameof(AccessibleStatus));
+        }
+    }
+
+    /// <summary>Records the current on-disk stamp as the one this tab is in sync with.</summary>
+    public void MarkSynchronized()
+    {
+        if (FilePath is null) { DiskLength = -1; return; }
+        try
+        {
+            var info = new FileInfo(FilePath);
+            if (!info.Exists) { DiskLength = -1; return; }
+
+            DiskWriteTimeUtc = info.LastWriteTimeUtc;
+            DiskLength = info.Length;
+            IsReadOnly = info.IsReadOnly;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            DiskLength = -1;
+        }
+    }
+
+    /// <summary>True when the file changed underneath us since <see cref="MarkSynchronized"/>.</summary>
+    public bool HasChangedOnDisk()
+    {
+        if (FilePath is null || DiskLength < 0) return false;
+        try
+        {
+            var info = new FileInfo(FilePath);
+            if (!info.Exists) return false;   // deletion is handled at save time instead
+            return info.LastWriteTimeUtc != DiskWriteTimeUtc || info.Length != DiskLength;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     public TextEncodingInfo Encoding

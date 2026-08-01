@@ -29,6 +29,11 @@ public sealed class AppSettings : INotifyPropertyChanged
     private string _defaultEncoding = "UTF-8";
     private string _defaultLineEnding = "CRLF";
     private double _zoom = 1.0;
+    private bool _lineNumbers;
+    private bool _wordCount;
+    private bool _highlightMatches = true;
+    private int _largeFileWarningMb = 20;
+    private List<string> _findHistory = new();
 
     public AppTheme Theme { get => _theme; set => Set(ref _theme, value); }
     public string FontFamily { get => _fontFamily; set => Set(ref _fontFamily, value); }
@@ -45,6 +50,26 @@ public sealed class AppSettings : INotifyPropertyChanged
     public string DefaultEncoding { get => _defaultEncoding; set => Set(ref _defaultEncoding, value); }
     public string DefaultLineEnding { get => _defaultLineEnding; set => Set(ref _defaultLineEnding, value); }
     public double Zoom { get => _zoom; set => Set(ref _zoom, value); }
+    public bool ShowLineNumbers { get => _lineNumbers; set => Set(ref _lineNumbers, value); }
+    public bool ShowWordCount { get => _wordCount; set => Set(ref _wordCount, value); }
+    public bool HighlightAllMatches { get => _highlightMatches; set => Set(ref _highlightMatches, value); }
+    public int LargeFileWarningMb { get => _largeFileWarningMb; set => Set(ref _largeFileWarningMb, value); }
+    public List<string> FindHistory { get => _findHistory; set => Set(ref _findHistory, value ?? new()); }
+
+    private const int FindHistoryLimit = 15;
+
+    /// <summary>Most recent first, no duplicates.</summary>
+    public void RememberSearch(string term)
+    {
+        if (string.IsNullOrWhiteSpace(term)) return;
+
+        var list = new List<string>(FindHistory);
+        list.RemoveAll(t => string.Equals(t, term, StringComparison.Ordinal));
+        list.Insert(0, term);
+        if (list.Count > FindHistoryLimit) list.RemoveRange(FindHistoryLimit, list.Count - FindHistoryLimit);
+
+        FindHistory = list;
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 

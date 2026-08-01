@@ -28,4 +28,14 @@
     </None>
   </ItemGroup>
 
+  <!-- The project lives at the repository root, so its default globs would otherwise
+       swallow the test project and the packaging sources sitting beneath it. -->
+  <ItemGroup>
+    <Compile Remove="tests/**;packaging/**;dist/**" />
+    <Page Remove="tests/**;packaging/**;dist/**" />
+    <None Remove="tests/**;packaging/**;dist/**" />
+    <Resource Remove="tests/**;packaging/**;dist/**" />
+    <ApplicationDefinition Remove="tests/**;packaging/**;dist/**" />
+  </ItemGroup>
+
 </Project>

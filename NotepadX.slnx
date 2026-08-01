@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/NotepadX.Tests/NotepadX.Tests.csproj" />
+  </Folder>
+  <Project Path="NotepadX.csproj" />
+</Solution>

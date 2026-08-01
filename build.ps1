@@ -23,7 +23,10 @@ $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
 $rid = "win-$Arch"
-$out = Join-Path $PSScriptRoot "dist\$Arch"
+# The framework-dependent build goes to its own folder: mixing it with the self-contained
+# output would leave two different NotepadX.exe files fighting over the same path.
+$outName = if ($Framework) { "dist\$Arch-framework" } else { "dist\$Arch" }
+$out = Join-Path $PSScriptRoot $outName
 
 if (-not (Test-Path 'Assets\app.ico')) {
     powershell -ExecutionPolicy Bypass -File 'tools\make-icon.ps1'
@@ -36,10 +39,12 @@ $publishArgs = @(
     '-o', $out,
     '-p:PublishSingleFile=true',
     '-p:IncludeNativeLibrariesForSelfExtract=true',
-    '-p:EnableCompressionInSingleFile=true',
     '-p:DebugType=none',
     '--nologo'
 )
+
+# Compression is only legal in a self-contained bundle.
+if (-not $Framework) { $publishArgs += '-p:EnableCompressionInSingleFile=true' }
 
 if ($Version) {
     if ($Version -notmatch '^\d+\.\d+(\.\d+)?$') { throw "Version must look like 1.4 or 1.4.0, got '$Version'" }
