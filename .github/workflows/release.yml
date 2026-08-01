@@ -1,0 +1,183 @@
+name: Release
+
+# Every push to main publishes a release. The version comes from the newest existing
+# v<major>.<minor> tag with the minor number bumped by one, so the first run produces
+# v1.0, then v1.1, v1.2 and so on. To move to a new major, create the tag yourself
+# (`git tag v2.0 && git push origin v2.0`) and the next push continues from there.
+#
+# Put "[skip release]" anywhere in the commit message to push without releasing.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, e.g. 1.4 (leave empty to auto-increment)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    if: "!contains(github.event.head_commit.message, '[skip release]')"
+
+    # Promoted to job level so the signing step can test for them: the secrets context
+    # is not available in a step-level `if`, but the env context is.
+    env:
+      SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
+      SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          $requested = '${{ github.event.inputs.version }}'
+
+          if ($requested) {
+            if ($requested -notmatch '^\d+\.\d+$') { throw "Version must look like 1.4, got '$requested'" }
+            $version = $requested
+          }
+          else {
+            $parsed = git tag --list 'v*' | ForEach-Object {
+              if ($_ -match '^v(\d+)\.(\d+)$') {
+                [pscustomobject]@{ Major = [int]$Matches[1]; Minor = [int]$Matches[2] }
+              }
+            } | Sort-Object Major, Minor
+
+            if (-not $parsed) {
+              $version = '1.0'
+            }
+            else {
+              $latest = @($parsed)[-1]
+              $version = "$($latest.Major).$($latest.Minor + 1)"
+            }
+          }
+
+          if (git tag --list "v$version") { throw "Tag v$version already exists" }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=v$version"
+          Write-Host "releasing NotepadX v$version"
+
+      - name: Build x64
+        shell: pwsh
+        run: ./build.ps1 -Arch x64 -Version '${{ steps.version.outputs.version }}'
+
+      - name: Build arm64
+        shell: pwsh
+        run: ./build.ps1 -Arch arm64 -Version '${{ steps.version.outputs.version }}'
+
+      - name: Sign binaries
+        if: ${{ env.SIGNING_CERT_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT_BASE64))
+
+            $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
+              $pfx, $env:SIGNING_CERT_PASSWORD, $flags)
+
+            foreach ($exe in @('dist/x64/NotepadX.exe', 'dist/arm64/NotepadX.exe')) {
+              $r = Set-AuthenticodeSignature -FilePath $exe -Certificate $cert `
+                     -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com'
+              Write-Host "$exe -> $($r.Status)"
+              if ($r.Status -in 'HashMismatch', 'NotSigned') { throw "signing failed for $exe" }
+            }
+          }
+          finally {
+            if (Test-Path $pfx) { Remove-Item $pfx -Force }
+          }
+
+      - name: Package artifacts
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+
+          foreach ($arch in 'x64', 'arm64') {
+            Copy-Item "dist/$arch/NotepadX.exe" "artifacts/NotepadX-v$version-win-$arch.exe"
+          }
+
+          # Portable variant: same binary, but it keeps its data next to itself
+          New-Item -ItemType Directory -Path portable -Force | Out-Null
+          Copy-Item 'dist/x64/NotepadX.exe' 'portable/NotepadX.exe'
+          Set-Content -Path 'portable/NotepadX.portable' -Value '' -Encoding utf8
+          Compress-Archive -Path 'portable/*' -DestinationPath "artifacts/NotepadX-v$version-win-x64-portable.zip" -Force
+
+          Get-ChildItem artifacts -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash)  $($_.Name)"
+          } | Set-Content 'artifacts/SHA256SUMS.txt' -Encoding ascii
+
+          Get-Content 'artifacts/SHA256SUMS.txt'
+
+      - name: Write release notes
+        shell: pwsh
+        run: |
+          $previous = git tag --list 'v*' --sort=-v:refname | Select-Object -First 1
+          $range = if ($previous) { "$previous..HEAD" } else { 'HEAD' }
+
+          $log = @(git log $range --no-merges --pretty=format:'- %s')
+          if (-not $log -or $log.Count -eq 0) { $log = @('- Maintenance build') }
+
+          # Single-quoted here-string: backticks in the markdown stay literal.
+          $body = @'
+          ## Downloads
+
+          | File | For |
+          | --- | --- |
+          | `NotepadX-vVERSION-win-x64.exe` | Windows 10 (1809+) and Windows 11, 64-bit |
+          | `NotepadX-vVERSION-win-arm64.exe` | Windows on ARM |
+          | `NotepadX-vVERSION-win-x64-portable.zip` | Same app, keeps its settings beside the executable |
+
+          No installer and no .NET runtime needed — download and run.
+
+          Verify a download against `SHA256SUMS.txt`:
+
+          ```powershell
+          Get-FileHash .\NotepadX-vVERSION-win-x64.exe -Algorithm SHA256
+          ```
+          '@ -replace 'VERSION', '${{ steps.version.outputs.version }}'
+
+          $notes = "## What changed`n`n" + ($log -join "`n") + "`n`n" + $body
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+          Get-Content release-notes.md
+
+      - name: Tag the commit
+        shell: pwsh
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag '${{ steps.version.outputs.tag }}'
+          git push origin '${{ steps.version.outputs.tag }}'
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem artifacts -File | ForEach-Object { $_.FullName }
+          gh release create '${{ steps.version.outputs.tag }}' $files `
+            --title 'NotepadX ${{ steps.version.outputs.tag }}' `
+            --notes-file release-notes.md
