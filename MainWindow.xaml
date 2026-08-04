@@ -16,8 +16,9 @@
         TextOptions.TextRenderingMode="ClearType"
         DataContext="{Binding RelativeSource={RelativeSource Self}}">
 
+    <!-- CaptionHeight covers the drag strip (14) plus the tab row (40). -->
     <shell:WindowChrome.WindowChrome>
-        <shell:WindowChrome CaptionHeight="40"
+        <shell:WindowChrome CaptionHeight="54"
                             ResizeBorderThickness="6"
                             GlassFrameThickness="0"
                             CornerRadius="0"
@@ -34,15 +35,16 @@
         <DataTemplate x:Key="TabTemplate" DataType="{x:Type m:DocumentTab}">
             <!-- Bottom corners stay square and the bottom border is dropped, so the
                  active tab reads as continuous with the menu bar underneath it. -->
-            <Border x:Name="TabRoot" Height="34" MinWidth="150" MaxWidth="260"
-                    Margin="1,6,0,0" CornerRadius="7,7,0,0"
+            <!-- No width here: TabStripPanel sizes every tab so a crowded strip still fits. -->
+            <Border x:Name="TabRoot" Height="34"
+                    Margin="0,6,2,0" CornerRadius="7,7,0,0"
                     Background="Transparent"
                     BorderThickness="1,1,1,0" BorderBrush="Transparent"
                     ToolTip="{Binding ToolTipText}"
                     AutomationProperties.Name="{Binding AccessibleName}"
                     AutomationProperties.ItemStatus="{Binding AccessibleStatus}"
                     shell:WindowChrome.IsHitTestVisibleInChrome="True">
-                <Grid Margin="12,0,6,0">
+                <Grid Margin="10,0,5,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
@@ -95,6 +97,8 @@
             Background="{DynamicResource App.Background}">
         <Grid>
             <Grid.RowDefinitions>
+                <RowDefinition Height="14" />
+                <!-- drag strip -->
                 <RowDefinition Height="40" />
                 <!-- title bar + tabs -->
                 <RowDefinition Height="Auto" />
@@ -107,44 +111,56 @@
                 <!-- status bar -->
             </Grid.RowDefinitions>
 
+            <!-- ==================== DRAG STRIP ==================== -->
+            <!-- Bare caption above the tabs. Nothing is hit-test-visible in chrome here, so
+                 this row always drags the window even when the tab strip is full. -->
+            <Border Grid.Row="0" Background="{DynamicResource App.TitleBar}" />
+
             <!-- ==================== TITLE BAR ==================== -->
-            <Grid Grid.Row="0" Background="{DynamicResource App.TitleBar}">
+            <Grid Grid.Row="1" Background="{DynamicResource App.TitleBar}">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
+                <!-- The ScrollViewer is deliberately not hit-test-visible in chrome: only the
+                     tabs and the buttons are, so leftover strip space drags the window too.
+                     It only scrolls once the tabs have shrunk to their minimum width. -->
                 <ScrollViewer x:Name="TabScroller" Grid.Column="0"
                               HorizontalScrollBarVisibility="Hidden"
                               VerticalScrollBarVisibility="Disabled"
                               PanningMode="HorizontalOnly"
-                              shell:WindowChrome.IsHitTestVisibleInChrome="True">
-                    <StackPanel Orientation="Horizontal">
-                        <ItemsControl x:Name="TabList"
-                                      ItemsSource="{Binding Documents}"
-                                      ItemTemplate="{StaticResource TabTemplate}"
-                                      PreviewMouseLeftButtonDown="TabList_PreviewMouseLeftButtonDown"
-                                      PreviewMouseMove="TabList_PreviewMouseMove"
-                                      PreviewMouseLeftButtonUp="TabList_PreviewMouseLeftButtonUp"
-                                      PreviewMouseDown="TabList_PreviewMouseDown">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <StackPanel Orientation="Horizontal" />
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                        </ItemsControl>
-
-                        <Button Style="{StaticResource IconButtonStyle}"
-                                Width="30" Height="30" Margin="4,5,0,0"
-                                VerticalAlignment="Center"
-                                ToolTip="New tab (Ctrl+N)"
-                                Content="{StaticResource Glyph.Add}"
-                                Command="{Binding NewTabCommand}"
-                                shell:WindowChrome.IsHitTestVisibleInChrome="True" />
-                    </StackPanel>
+                              PreviewMouseWheel="TabScroller_PreviewMouseWheel"
+                              SizeChanged="TabScroller_SizeChanged">
+                    <ItemsControl x:Name="TabList"
+                                  HorizontalAlignment="Left"
+                                  ItemsSource="{Binding Documents}"
+                                  ItemTemplate="{StaticResource TabTemplate}"
+                                  PreviewMouseLeftButtonDown="TabList_PreviewMouseLeftButtonDown"
+                                  PreviewMouseMove="TabList_PreviewMouseMove"
+                                  PreviewMouseLeftButtonUp="TabList_PreviewMouseLeftButtonUp"
+                                  PreviewMouseDown="TabList_PreviewMouseDown">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <!-- AvailableWidth is pushed from the code-behind rather than bound to
+                                     the ScrollViewer: the viewport is a layout result, and feeding it
+                                     back into the measure of its own content settles on stale values. -->
+                                <ctl:TabStripPanel Loaded="TabStrip_Loaded" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                    </ItemsControl>
                 </ScrollViewer>
 
-                <StackPanel Grid.Column="1" Orientation="Horizontal"
+                <Button Grid.Column="1" Style="{StaticResource IconButtonStyle}"
+                        Width="30" Height="30" Margin="4,5,4,0"
+                        VerticalAlignment="Center"
+                        ToolTip="New tab (Ctrl+N)"
+                        Content="{StaticResource Glyph.Add}"
+                        Command="{Binding NewTabCommand}"
+                        shell:WindowChrome.IsHitTestVisibleInChrome="True" />
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal"
                             shell:WindowChrome.IsHitTestVisibleInChrome="True">
                     <Button Style="{StaticResource CaptionButtonStyle}"
                             Content="{StaticResource Glyph.Minimize}" ToolTip="Minimize"
@@ -159,7 +175,7 @@
             </Grid>
 
             <!-- ==================== MENU BAR ==================== -->
-            <Grid Grid.Row="1" Background="{DynamicResource App.Surface}">
+            <Grid Grid.Row="2" Background="{DynamicResource App.Surface}">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
@@ -257,7 +273,7 @@
             </Grid>
 
             <!-- ==================== FIND / REPLACE ==================== -->
-            <Border x:Name="FindBar" Grid.Row="2" Visibility="Collapsed"
+            <Border x:Name="FindBar" Grid.Row="3" Visibility="Collapsed"
                     Background="{DynamicResource App.SurfaceElevated}"
                     BorderBrush="{DynamicResource App.Border}" BorderThickness="0,0,0,1"
                     Padding="12,10">
@@ -334,7 +350,7 @@
             </Border>
 
             <!-- ==================== EDITOR ==================== -->
-            <Border Grid.Row="3" Background="{DynamicResource App.Surface}">
+            <Border Grid.Row="4" Background="{DynamicResource App.Surface}">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -349,7 +365,7 @@
             </Border>
 
             <!-- ==================== STATUS BAR ==================== -->
-            <Border x:Name="StatusBarRoot" Grid.Row="4" Height="28"
+            <Border x:Name="StatusBarRoot" Grid.Row="5" Height="28"
                     Background="{DynamicResource App.StatusBar}"
                     BorderBrush="{DynamicResource App.Divider}" BorderThickness="0,1,0,0">
                 <Grid>

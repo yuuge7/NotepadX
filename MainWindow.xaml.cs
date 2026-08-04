@@ -346,6 +346,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 Gutter.Attach(null);
             }
 
+            ScrollActiveTabIntoView();
+
             OnPropertyChanged();
             OnPropertyChanged(nameof(WindowTitle));
             UpdateStatus();
@@ -1743,6 +1745,51 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     private void TabList_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e) => _dragTab = null;
+
+    private TabStripPanel? _tabStrip;
+
+    private void TabStrip_Loaded(object sender, RoutedEventArgs e)
+    {
+        _tabStrip = (TabStripPanel)sender;
+        UpdateTabStripWidth();
+    }
+
+    private void TabScroller_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateTabStripWidth();
+
+    /// <summary>
+    /// Hands the strip the width it may divide between the tabs. The ScrollViewer's own width
+    /// comes from the title-bar grid and never grows with its content, so this cannot feed back
+    /// into itself the way binding to the viewport does.
+    /// </summary>
+    private void UpdateTabStripWidth()
+    {
+        if (_tabStrip is not null) _tabStrip.AvailableWidth = TabScroller.ActualWidth;
+    }
+
+    private void TabScroller_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        // Only claim the wheel when the strip actually overflows; otherwise let it bubble.
+        if (TabScroller.ScrollableWidth <= 0) return;
+        TabScroller.ScrollToHorizontalOffset(TabScroller.HorizontalOffset - e.Delta);
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Scrolls the active tab back into view. Tabs stop shrinking at a minimum width, so a
+    /// strip with enough tabs on it overflows and the active one can sit off-screen.
+    /// </summary>
+    private void ScrollActiveTabIntoView()
+    {
+        var tab = _activeTab;
+        if (tab is null) return;
+
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (!ReferenceEquals(_activeTab, tab)) return;
+            if (TabList.ItemContainerGenerator.ContainerFromItem(tab) is FrameworkElement container)
+                container.BringIntoView();
+        }, DispatcherPriority.Loaded);
+    }
 
     private void TabList_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
