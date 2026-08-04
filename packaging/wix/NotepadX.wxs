@@ -3,10 +3,17 @@
   Per-user MSI. Installing into LocalAppData means no elevation prompt and no
   administrator rights, which matters for an app people install to try out.
 
-  Build with:  wix build packaging\wix\NotepadX.wxs -d Version=1.0.0 -d SourceExe=... -o NotepadX.msi
+  The program goes to %LOCALAPPDATA%\Programs\NotepadX, deliberately NOT to
+  %LOCALAPPDATA%\NotepadX where the app keeps settings, session and recovery buffers.
+  Keeping the two apart is what makes uninstall able to remove the install folder whole
+  without taking the user's data with it, and keeps an upgrade from touching data at all.
+
+  Build with:  wix build packaging\wix\NotepadX.wxs -ext WixToolset.Util.wixext
+                   -d Version=1.0.0 -d SourceExe=... -o NotepadX.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
   <Package Name="NotepadX"
            Manufacturer="yuuge7"
@@ -18,8 +25,21 @@
 
     <SummaryInformation Description="NotepadX — offline text editor with tabs" />
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of NotepadX is already installed." />
+    <!-- AllowSameVersionUpgrades: rebuilding the same version and installing it again
+         replaces the existing install instead of landing a second entry in Installed apps
+         that shares one component with the first. Downgrades stay blocked on purpose. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of NotepadX is already installed. Uninstall it from Settings &gt; Apps &gt; Installed apps first, then run this installer again." />
     <MediaTemplate EmbedCab="yes" />
+
+    <!-- Asks a running NotepadX to close before files are replaced. Without this the
+         installer falls back to the Restart Manager, which can end up demanding a reboot. -->
+    <util:CloseApplication Id="CloseNotepadX"
+                           Target="NotepadX.exe"
+                           CloseMessage="yes"
+                           RebootPrompt="no"
+                           PromptToContinue="yes"
+                           Description="NotepadX is running. Close it to continue, then press Retry." />
 
     <Icon Id="AppIcon" SourceFile="$(IconFile)" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
@@ -30,7 +50,9 @@
     <WixVariable Id="WixUILicenseRtf" Value="$(LicenseFile)" />
 
     <StandardDirectory Id="LocalAppDataFolder">
-      <Directory Id="INSTALLFOLDER" Name="NotepadX" />
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="NotepadX" />
+      </Directory>
     </StandardDirectory>
 
     <StandardDirectory Id="ProgramMenuFolder">
@@ -43,7 +65,9 @@
 
     <ComponentGroup Id="AppComponents" Directory="INSTALLFOLDER">
 
-      <Component Id="Executable" Guid="1c0a8b6e-5d3f-4c1a-b0e6-7c9d4a2f8b51">
+      <!-- New GUID because the install path moved: a component GUID must always stand for
+           the same file in the same place, or an upgrade leaves the old exe orphaned. -->
+      <Component Id="Executable" Guid="93f69879-871b-4e5b-8ece-e28367d0b874">
         <File Id="NotepadXExe" Source="$(SourceExe)" Name="NotepadX.exe" KeyPath="yes">
           <!-- Adds NotepadX to the Open with list. Windows still decides the default. -->
           <Shortcut Id="StartMenuShortcut"
@@ -55,6 +79,9 @@
         </File>
 
         <RemoveFolder Id="RemoveShortcutFolder" Directory="ShortcutFolder" On="uninstall" />
+        <!-- The install folder holds nothing but the exe now, so it goes too and no empty
+             NotepadX folder is left under %LOCALAPPDATA%\Programs. -->
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
 
         <!-- One ProgId with one verb. A verb per extension would emit the same
              ProgId\shell\open\command row several times and fail the build; the other

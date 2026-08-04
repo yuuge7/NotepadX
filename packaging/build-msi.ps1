@@ -49,10 +49,12 @@ if (-not $hasWix) {
 
 dotnet tool restore | Out-Null
 
-$hasUi = (dotnet wix extension list -g 2>$null | Select-String -Pattern 'WixToolset.UI.wixext') -ne $null
-if (-not $hasUi) {
-    Write-Host 'installing the WiX UI extension' -ForegroundColor Cyan
-    dotnet wix extension add -g "WixToolset.UI.wixext/$wixVersion" | Out-Null
+$installed = dotnet wix extension list -g 2>$null
+foreach ($ext in 'WixToolset.UI.wixext', 'WixToolset.Util.wixext') {
+    if (-not ($installed | Select-String -Pattern ([regex]::Escape($ext)))) {
+        Write-Host "installing $ext" -ForegroundColor Cyan
+        dotnet wix extension add -g "$ext/$wixVersion" | Out-Null
+    }
 }
 
 $outDir = Join-Path $root "dist\$Arch"
@@ -61,6 +63,7 @@ $msi = Join-Path $outDir "NotepadX-v$Version-win-$Arch.msi"
 Write-Host "building $msi" -ForegroundColor Cyan
 dotnet wix build (Join-Path $PSScriptRoot 'wix\NotepadX.wxs') `
     -ext WixToolset.UI.wixext `
+    -ext WixToolset.Util.wixext `
     -arch $Arch `
     -d "Version=$msiVersion" `
     -d "SourceExe=$ExePath" `

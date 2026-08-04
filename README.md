@@ -144,6 +144,11 @@ NotepadX [options] [file ...]
 **Settings › About › Open data folder** takes you there. Deleting the folder resets the
 app completely. Nothing is written anywhere else, and nothing leaves the machine.
 
+The MSI installs the program itself to `%LOCALAPPDATA%\Programs\NotepadX\`, a separate
+folder, so uninstalling removes the app and leaves the data above untouched — reinstall
+later and your settings and tabs are still there. To clear it out too, delete
+`%LOCALAPPDATA%\NotepadX\` by hand after uninstalling.
+
 Put an empty file named `NotepadX.portable` next to the executable and all of the above
 moves to a `Data` folder beside it instead — useful on a USB stick. The portable release
 zip already contains that marker.
