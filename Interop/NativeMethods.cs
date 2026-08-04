@@ -51,6 +51,28 @@ internal static class NativeMethods
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter,
+                                            int x, int y, int cx, int cy, uint flags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsZoomed(IntPtr hwnd);
+
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOZORDER = 0x0004;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_FRAMECHANGED = 0x0020;
+
     /// <summary>
     /// Keeps a maximized borderless window inside the monitor work area so it does not
     /// spill under the taskbar or lose ~8px of content to the invisible resize border.
@@ -90,9 +112,32 @@ internal static class NativeMethods
         {
             if (DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref value, sizeof(int)) != 0)
                 DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, ref value, sizeof(int));
+
+            RepaintCaption(hwnd);
         }
         catch (DllNotFoundException) { /* pre-Vista shells only; ignore */ }
         catch (EntryPointNotFoundException) { }
+    }
+
+    /// <summary>
+    /// Makes DWM redraw the caption with the colour that was just set. A window that is
+    /// already on screen keeps the old caption until its frame is recomputed, and
+    /// SWP_FRAMECHANGED on its own is not enough — only a real size change is, so the
+    /// window grows by a pixel and immediately shrinks back. Skipped while the window is
+    /// hidden (the first paint picks the colour up anyway) and while it is maximized,
+    /// where resizing would fight the maximized bounds.
+    /// </summary>
+    private static void RepaintCaption(IntPtr hwnd)
+    {
+        if (!IsWindowVisible(hwnd) || IsZoomed(hwnd)) return;
+        if (!GetWindowRect(hwnd, out var r)) return;
+
+        const uint flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED;
+        int w = r.Right - r.Left;
+        int h = r.Bottom - r.Top;
+
+        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, w, h + 1, flags);
+        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, w, h, flags);
     }
 
     /// <summary>Mica backdrop. Silently ignored on Windows 10, which has no backdrop API.</summary>

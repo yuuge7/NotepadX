@@ -15,10 +15,16 @@ public partial class InputDialog : Window
         ValueBox.Text = initial;
         Loaded += (_, _) =>
         {
-            NativeMethods.SetDarkTitleBar(this, ThemeManager.IsDark);
             ValueBox.Focus();
             ValueBox.SelectAll();
         };
+    }
+
+    /// <summary>Before the first paint, or the caption is drawn light and stays light.</summary>
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        NativeMethods.SetDarkTitleBar(this, ThemeManager.IsDark);
     }
 
     public string Value => ValueBox.Text;

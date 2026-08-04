@@ -16,7 +16,6 @@ public partial class SettingsWindow : Window
     public SettingsWindow()
     {
         InitializeComponent();
-        Loaded += (_, _) => NativeMethods.SetDarkTitleBar(this, ThemeManager.IsDark);
 
         PopulateFonts();
         PopulateSizes();
@@ -29,6 +28,16 @@ public partial class SettingsWindow : Window
             (Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.0.0");
 
         RefreshAssociationState();
+    }
+
+    /// <summary>
+    /// Dark caption has to be asked for before the window is first painted. Doing it from
+    /// Loaded is too late: the frame is already drawn light and stays that way.
+    /// </summary>
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        NativeMethods.SetDarkTitleBar(this, ThemeManager.IsDark);
     }
 
     private void PopulateFonts()
